@@ -3,85 +3,90 @@ import json
 import aiohttp
 import websockets
 import uuid
+from rich.console import Console
+from rich.text import Text
+import os
+
+console = Console()
 
 CHECKIN_URL = "https://director.getgrass.io/checkin"
-RECONNECT_INTERVAL = 5  # seconds
-PING_INTERVAL = 60  # seconds
+USER_INFO_URL = "https://api.getgrass.io/retrieveUser"
+CHECKIN_INTERVAL = 300  # 5 minutes
+PING_INTERVAL = 60  # 1 minute
+
 HEADERS = {
-    "accept": "*/*",
-    "accept-encoding": "gzip, deflate, br, zstd",
-    "accept-language": "en-US,en;q=0.9",
-    "content-type": "application/json",
-    "origin": "chrome-extension://ilehaonighjijnmpnagapkhpcdbhclfg",
-    "priority": "u=1, i",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "none",
-    "sec-fetch-storage-access": "active",
-    "sec-gpc": "1",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-}
-ws_headers = {
-    "Accept-Encoding": "gzip, deflate",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
     "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
+    "Content-Type": "application/json",
     "Origin": "chrome-extension://ilehaonighjijnmpnagapkhpcdbhclfg",
-    "Pragma": "no-cache",
-    "Sec-Websocket-Extensions": "permessage-deflate; client_max_window_bits",
-    "Sec-Websocket-Key": "6M+h35F59kz8IDzq41KEnw==",
-    "Sec-WebSocket-Version": "13",
-    "Upgrade": "websocket",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 }
 
+def clear_screen():
+    os.system("cls" if os.name == "nt" else "clear")
 
-async def get_local_storage():
-    # Simulating getting local storage data (you may need to replace this with actual storage retrieval)
-    return {
-        "browserId": "your_browser_id",
-        "userId": "your_user_id",
-        "permissions": True,
-    }
+def user_token():
+    try:
+        with open("user_token.txt", "r") as file:
+            return file.readline().strip()
+    except FileNotFoundError:
+        print("[ERROR] user_token.txt not found.")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+        return None
+    
+def print_header(username, total_points, total_uptime):
+    text = " SPLEKENESIS BOT"
+    border = "*" * (len(text) + 30)
+    console.print(f"[green]{border}[/green]")
+    console.print(f"[green][red]{text}[/red] [blue]v2.5[/blue]              [/green]")
+    console.print(f"[green] [white]Username: [/white][red]{username}[/red]               [/green]")
+    console.print(f"[green] [white]Total UpTime: [/white][red]{total_uptime}[/red]               [/green]")
+    console.print(f"[green] [white]Total Points: [/white][red]{total_points}[/red]               [/green]")
+    console.print(f"[green]{border}[/green]")
 
-async def checkin():
-    # storage = await get_local_storage()
-    
-    # if not storage.get("browserId") or not storage.get("permissions") or not storage.get("userId"):
-    #     print("[CHECKIN] Missing required parameters: BROWSER ID, PERMISSIONS, or USER ID")
-    #     return None
-    
-    payload = {
-        "browserId": "6335bf8b-7294-5d8e-8bbc-75cb2b0fdfe3",
-        "userId": "e5ace647-0cb8-46f8-9d47-19abd6d72b1c",
-        "version": "5.1.1",
-        "extensionId": "ilehaonighjijnmpnagapkhpcdbhclfg",
-        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-        "deviceType": "extension"
-    }
-    
+async def retrieve_user_info():
+    headers = HEADERS.copy()
+    tokens = user_token()
+    headers["Authorization"] = f"{tokens}"
+
     async with aiohttp.ClientSession() as session:
-        async with session.post(CHECKIN_URL, json=payload, headers=HEADERS) as response:
-            text_response = await response.text()  # Read response as text
-            
-            if response.status == 201:
-                try:
-                    data = json.loads(text_response)  # Manually parse JSON
-                    return data
-                except json.JSONDecodeError:
-                    print(f"[CHECKIN] Failed to decode JSON: {text_response}")
-                    return None
-            else:
-                print(f"[CHECKIN] Failed with status {response.status}: {text_response}")
-                return None
+        try:
+            async with session.get(USER_INFO_URL, headers=headers) as response:
+                text_response = await response.text()
+
+                if response.status == 200:
+                    try:
+                        data = json.loads(text_response)
+                        user_info = data.get("result", {}).get("data", None)
+
+                        if not user_info:
+                            console.print(f"[red][ERROR][/red] User info missing in API response: {data}")
+                        return user_info
+
+                    except json.JSONDecodeError:
+                        console.print(f"[red][ERROR][/red] Failed to parse user info JSON: {text_response}")
+
+                else:
+                    console.print(f"[red][ERROR][/red] Failed to fetch user info (Status {response.status}): {text_response}")
+
+        except Exception as e:
+            console.print(f"[red][ERROR][/red] Request to retrieve user info failed: {e}")
+
+    return None  # Ensure we return None if there's an issue
 
 async def websocket_handler(destination, token):
-    retries = 0
-    max_retries = 5
+    """ Handles WebSocket communication and automatic reconnects. """
+    ws_url = f"ws://{destination}?token={token}"
     
-    while retries < max_retries:
+    while True:  # Keep retrying if the connection is lost
+        console.print(f"[green][WEBSOCKET][/green] Connecting to: [blue]{destination}[/blue] websocket...")
+        
         try:
-            async with websockets.connect(f"ws://{destination}?token={token}") as ws:
-                print("[WEBSOCKET] Connected")
+            async with websockets.connect(ws_url) as ws:
+                console.print(f"[green][WEBSOCKET][/green] Connected!")
 
                 async def send_ping():
                     while True:
@@ -92,7 +97,7 @@ async def websocket_handler(destination, token):
                             "data": {}
                         })
                         await ws.send(ping_message)
-                        print(f"[WEBSOCKET] Sent: {ping_message}")
+                        console.print(f"[green][WEBSOCKET][/green] Sent: [blue]{ping_message}[/blue]")
                         await asyncio.sleep(PING_INTERVAL)
 
                 async def receive_messages():
@@ -101,35 +106,77 @@ async def websocket_handler(destination, token):
                             message = await ws.recv()
                             try:
                                 parsed_message = json.loads(message)
-                                print(f"[WEBSOCKET] Received: {parsed_message}")
+                                console.print(f"[green][WEBSOCKET][/green] Received: [blue]{parsed_message}[/blue]")
                             except json.JSONDecodeError:
-                                print("[WEBSOCKET] Could not parse message!", message)
+                                console.print(f"[red][WEBSOCKET][/red] Could not parse message: {message}")
                         except websockets.exceptions.ConnectionClosed:
-                            print("[WEBSOCKET] Connection closed by server. Reconnecting...")
-                            return
+                            console.print(f"[red][WEBSOCKET][/red] Connection lost. Reconnecting...")
+                            break  # Exit the receive loop to reconnect
 
-                # Run send and receive tasks concurrently
-                await asyncio.gather(send_ping(), receive_messages())
+                # Start WebSocket tasks
+                ping_task = asyncio.create_task(send_ping())
+                receive_task = asyncio.create_task(receive_messages())
 
-        except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError) as e:
-            print(f"[WEBSOCKET] Connection error: {e}. Retrying in {RECONNECT_INTERVAL} seconds...")
-            await asyncio.sleep(RECONNECT_INTERVAL)
-            retries += 1
+                await asyncio.wait([ping_task, receive_task])
 
-    print("[WEBSOCKET] Maximum retries reached. Connection failed.")
+        except Exception as e:
+            console.print(f"[red][WEBSOCKET][/red] Connection failed: {e}. Retrying in 5 seconds...")
+            await asyncio.sleep(5)  # Retry after 5 seconds
 
-async def main():
-    data = await checkin()
-    if not data:
-        return
+async def checkin():
+    """ Performs check-in and retrieves user info. """
+    payload = {
+        "browserId": "6335bf8b-7294-5d8e-8bbc-75cb2b0fdfe3",
+        "userId": "e5ace647-0cb8-46f8-9d47-19abd6d72b1c",
+        "version": "5.1.1",
+        "extensionId": "ilehaonighjijnmpnagapkhpcdbhclfg",
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "deviceType": "extension"
+    }
     
-    destinations = data.get("destinations", [])
-    token = data.get("token")
-    
-    if not destinations or not token:
-        print("[ERROR] No destinations or token found!")
-        return
-    
-    await websocket_handler(destinations[0], token)  # Connect to the first destination
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.post(CHECKIN_URL, json=payload, headers=HEADERS) as response:
+                    text_response = await response.text()
 
-asyncio.run(main())
+                    if response.status == 201:
+                        try:
+                            user_info = await retrieve_user_info()
+                            if user_info:
+                                print_header(
+                                    user_info.get('username', 'Unknown'),
+                                    user_info.get('totalPoints', 0),
+                                    user_info.get('totalUptime', 0)
+                                )
+                            else:
+                                console.print(f"[red][CHECKIN][/red] Failed to retrieve user info")
+                            
+                            data = json.loads(text_response)
+                            destinations = data.get("destinations", [])
+                            token = data.get("token")
+
+                            if not token:
+                                console.print(f"[red][CHECKIN][/red] No token found.")
+                                continue
+
+                            if destinations:
+                                console.print(f"[green][CHECKIN][/green] Connected to: [blue]{destinations[0]}[/blue]")
+                                await websocket_handler(destinations[0], token)
+                            else:
+                                console.print(f"[red][CHECKIN][/red] No destinations found")
+
+                        except json.JSONDecodeError:
+                            console.print(f"[red][CHECKIN][/red] Failed to parse response: {text_response}")
+
+                    else:
+                        console.print(f"[red][CHECKIN][/red] Check-in failed: {response.status}")
+
+            except Exception as e:
+                console.print(f"[red][CHECKIN][/red] Error: {e}")
+
+            console.print(f"[blue][INFO][/blue] Next check-in in [green]{CHECKIN_INTERVAL}[/green] seconds...")
+            await asyncio.sleep(CHECKIN_INTERVAL)
+
+# Start the bot
+asyncio.run(checkin())
